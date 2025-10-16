@@ -71,6 +71,10 @@ class CarInterface(CarInterfaceBase):
         else:
           ret.flags |= HyundaiFlags.CANFD_ALT_GEARS.value
 
+      # CAN FD 0x180 - 0x184 have radar track information
+      if 0x180 in fingerprint[CAN.ACAN]:
+        ret.flags |= HyundaiFlags.CANFD_RADAR.value
+
       cfgs = [get_safety_config(structs.CarParams.SafetyModel.hyundaiCanfd), ]
       if CAN.ECAN >= 4:
         cfgs.insert(0, get_safety_config(structs.CarParams.SafetyModel.noOutput))

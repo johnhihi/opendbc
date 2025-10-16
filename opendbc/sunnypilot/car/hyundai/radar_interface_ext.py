@@ -5,7 +5,6 @@ from opendbc.car.hyundai.values import DBC, HyundaiFlags
 
 from opendbc.sunnypilot.car.hyundai.escc import EsccRadarInterfaceBase
 
-
 class RadarInterfaceExt(EsccRadarInterfaceBase):
   msg_src: str
   trigger_msg: int
@@ -21,13 +20,16 @@ class RadarInterfaceExt(EsccRadarInterfaceBase):
 
   @property
   def use_radar_interface_ext(self) -> bool:
-    return self.use_escc or self.CP.flags & (HyundaiFlags.CAMERA_SCC | HyundaiFlags.CANFD_CAMERA_SCC)
+    return self.use_escc or self.CP.flags & (HyundaiFlags.CAMERA_SCC | HyundaiFlags.CANFD_CAMERA_SCC | HyundaiFlags.CANFD_RADAR)
+
 
   def get_msg_src(self) -> str | None:
     if self.use_escc:
       return "ESCC"
     if self.CP.flags & (HyundaiFlags.CAMERA_SCC | HyundaiFlags.CANFD_CAMERA_SCC):
       return "SCC_CONTROL" if self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC else "SCC11"
+    if self.CP.flags & HyundaiFlags.CANFD_RADAR:
+      return "RADAR_TRACK_180"
 
   def get_radar_ext_can_parser(self) -> CANParser:
     if self.ESCC.enabled:
@@ -35,6 +37,9 @@ class RadarInterfaceExt(EsccRadarInterfaceBase):
     elif self.CP.flags & (HyundaiFlags.CAMERA_SCC | HyundaiFlags.CANFD_CAMERA_SCC):
       lead_src = "SCC_CONTROL" if self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC else "SCC11"
       bus = CanBus(self.CP).CAM if self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC else 2
+    elif self.CP.flags & HyundaiFlags.CANFD_RADAR:
+      messages = [(f"RADAR_TRACK_{addr:x}", 50) for addr in range( 0x180, 0x185)]
+      return CANParser(DBC[self.CP.carFingerprint][Bus.pt], messages, 1)
     else:
       return None
 
@@ -46,6 +51,8 @@ class RadarInterfaceExt(EsccRadarInterfaceBase):
       return self.ESCC.trigger_msg
     if self.CP.flags & (HyundaiFlags.CAMERA_SCC | HyundaiFlags.CANFD_CAMERA_SCC):
       return 0x1A0 if self.CP.flags & HyundaiFlags.CANFD_CAMERA_SCC else 0x420
+    if self.CP.flags & HyundaiFlags.CANFD_RADAR:
+      return 0x180
     return default_trigger_msg
 
   def initialize_radar_ext(self, default_trigger_msg) -> None:
@@ -54,11 +61,15 @@ class RadarInterfaceExt(EsccRadarInterfaceBase):
 
     self.rcp = self.get_radar_ext_can_parser()
     self.trigger_msg = self.get_trigger_msg(default_trigger_msg)
+    self.radar_off_can = False if self.rcp is not None else True
 
   def update_ext(self, ret: structs.RadarData) -> structs.RadarData:
     if not self.rcp.can_valid:
       ret.errors.canError = True
       return ret
+
+    if self.CP.flags & HyundaiFlags.CANFD_RADAR:
+      return self._update_canfd()
 
     for ii in range(1):
       msg_src = self.get_msg_src()
@@ -80,6 +91,50 @@ class RadarInterfaceExt(EsccRadarInterfaceBase):
 
       else:
         del self.pts[ii]
+
+    ret.points = list(self.pts.values())
+    return ret
+
+  def _update_canfd(self):
+    ret = structs.RadarData()
+    if self.rcp is None:
+      return ret
+
+    if not self.rcp.can_valid:
+      ret.errors.canError = True
+
+    # pts keeps latest radar status
+    self.pts.clear()
+
+    for addr in range( 0x180, 0x185):
+      msg = self.rcp.vl[f"RADAR_TRACK_{addr:x}"]
+      track_id1 = int(msg['TRACK_ID1'])
+      track_heartbeat1 = int(msg['TRACK_HEARTBEAT1'])
+
+      if track_id1 != 0 and track_heartbeat1 != 0:
+        self.pts[track_id1] = structs.RadarData.RadarPoint()
+        self.pts[track_id1].trackId = track_id1
+
+        self.pts[track_id1].dRel = float(msg['LONG_DIST1'])
+        self.pts[track_id1].yRel = float(msg['LAT_DIST1'])
+        self.pts[track_id1].vRel = float(msg['REL_SPEED1'])
+        self.pts[track_id1].yvRel = float(msg['LAT_SPEED1'])
+        self.pts[track_id1].aRel = float(msg['REL_ACCEL1'])
+        self.pts[track_id1].measured = True
+
+      track_id2 = int(msg['TRACK_ID2'])
+      track_heartbeat2 = int(msg['TRACK_HEARTBEAT2'])
+
+      if track_id2 != 0 and track_heartbeat2 != 0:
+        self.pts[track_id2] = structs.RadarData.RadarPoint()
+        self.pts[track_id2].trackId = track_id2
+
+        self.pts[track_id2].dRel = float(msg['LONG_DIST2'])
+        self.pts[track_id2].yRel = float(msg['LAT_DIST2'])
+        self.pts[track_id2].vRel = float(msg['REL_SPEED2'])
+        self.pts[track_id2].yvRel = float(msg['LAT_SPEED2'])
+        self.pts[track_id2].aRel = float(msg['REL_ACCEL2'])
+        self.pts[track_id2].measured = True
 
     ret.points = list(self.pts.values())
     return ret
